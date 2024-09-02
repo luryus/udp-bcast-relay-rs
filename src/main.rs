@@ -4,28 +4,29 @@ use std::{
 };
 
 use anyhow::{anyhow, Context};
-use clap::{arg, command, value_parser, Arg, ArgAction};
+use clap::{command, value_parser, Arg, ArgAction};
 use libc::{CMSG_DATA, CMSG_FIRSTHDR};
-use packet::{AsPacket, AsPacketMut, Builder};
+use packet::Builder;
 use socket2::{Domain, MaybeUninitSlice, MsgHdrMut, Protocol, SockAddr, Socket, Type};
-use socket_pktinfo::PktInfoUdpSocket;
 use std::os::fd::AsRawFd;
 
 struct BroadcastIf {
     dst_addr: Ipv4Addr,
+    index: u32,
     socket: Socket,
 }
 
-const TTL_ID_OFFSET: u16 = 64;
+const TTL_ID_OFFSET: u8 = 64;
 
 fn main() -> anyhow::Result<()> {
+    stderrlog::new().module(module_path!()).verbosity(4).init().unwrap();
     let args = command!()
-        .arg(Arg::new("id").value_parser(value_parser!(u16).range(1..99)))
-        .arg(Arg::new("port").value_parser(value_parser!(u16).range(1..)))
-        .arg(Arg::new("interface").action(ArgAction::Append))
+        .arg(Arg::new("id").required(true).value_parser(value_parser!(u8).range(1..99)))
+        .arg(Arg::new("port").required(true).value_parser(value_parser!(u16).range(1..)))
+        .arg(Arg::new("interface").required(true).action(ArgAction::Append))
         .get_matches();
 
-    let id: u16 = *args.get_one("id").unwrap();
+    let id: u8 = *args.get_one("id").unwrap();
     let port: u16 = *args.get_one("port").unwrap();
     let bcast_interface_names: Vec<_> = args
         .get_many::<String>("interface")
@@ -61,22 +62,27 @@ fn main() -> anyhow::Result<()> {
             })
             .context("No address found for interface {int_name}")?;
 
-        let send_sock = Socket::new(Domain::IPV4, Type::RAW, None)?;
-        send_sock.set_broadcast(true)?;
-        send_sock.bind_device(Some(int.name.as_bytes()))?;
-        send_sock.set_header_included(true)?;
+        let send_sock = Socket::new(
+            libc::AF_INET.into(),
+            Type::RAW,
+            Some(libc::IPPROTO_RAW.into())).unwrap();
+        send_sock.set_header_included(true).unwrap();
+        send_sock.set_broadcast(true).unwrap();
+        send_sock.bind_device(Some(int.name.as_bytes())).unwrap();
 
         bcast_interfaces.push(BroadcastIf {
             dst_addr: addr,
             socket: send_sock,
+            index: int.index
         });
     }
 
     let rcv_sock = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
     unsafe { setsockopt(rcv_sock.as_raw_fd(), libc::IPPROTO_IP, libc::IP_RECVTTL, 1)? };
     unsafe { setsockopt(rcv_sock.as_raw_fd(), libc::IPPROTO_IP, libc::IP_PKTINFO, 1)? };
-    let addr = SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), port);
+    let addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port);
     rcv_sock.bind(&addr.into())?;
+    log::info!("Bound socket {rcv_sock:?}");
 
     let mut control_buf = vec![MaybeUninit::uninit(); 16 * 1024];
     let mut rcv_addr: SockAddr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0).into();
@@ -109,8 +115,8 @@ fn main() -> anyhow::Result<()> {
             msg_iovlen: 0,
         };
 
-        let mut ttl: Option<u16> = None;
-        let mut if_index: Option<u16> = None;
+        let mut ttl: Option<u8> = None;
+        let mut if_index: Option<u32> = None;
 
         let mut cmsg = unsafe { CMSG_FIRSTHDR(&libc_hdr) };
         while !cmsg.is_null() {
@@ -142,20 +148,22 @@ fn main() -> anyhow::Result<()> {
             continue;
         }
 
-        log::debug!("Got remote pkg: TTL {ttl}, if {if_index}, from: {rcv_addr:?}");
-
         let rcv_addr = rcv_addr.as_socket_ipv4().context("rcv_addr not ipv4")?;
+        log::debug!("Got remote pkg: TTL {ttl}, if {if_index}, from: {rcv_addr:?}");
 
         let mut packet_buf = vec![0u8; 8192];
 
         for interface in &bcast_interfaces {
+            if interface.index == if_index {
+                continue;
+            }
             packet_buf.fill(0);
-            let mut udp_b =
+            let udp_b =
                 packet::ip::v4::Builder::with(packet::buffer::Slice::new(&mut packet_buf))?
                     .source(*rcv_addr.ip())?
                     .destination(interface.dst_addr)?
                     .id(0x1234)?
-                    .ttl(ttl.clamp(0, u8::MAX.into()) as u8)?
+                    .ttl(TTL_ID_OFFSET + id)?
                     .protocol(packet::ip::Protocol::Udp)?
                     .udp()?;
 
@@ -167,6 +175,7 @@ fn main() -> anyhow::Result<()> {
                 .build()?;
             let a = SocketAddrV4::new(interface.dst_addr, port);
             interface.socket.send_to(udp_packet, &a.into())?;
+            log::debug!("Sent packet to {a}");
         }
     }
 

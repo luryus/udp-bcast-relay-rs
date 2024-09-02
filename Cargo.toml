@@ -12,3 +12,4 @@ netdev = "0.30.0"
 packet = "0.1.4"
 socket-pktinfo = "0.2.1"
 socket2 = { version = "0.5.7", features = ["all"] }
+stderrlog = { version = "0.6.0", default-features = false }
