@@ -1,14 +1,13 @@
-use std::{
-    mem::MaybeUninit,
-    net::{Ipv4Addr, SocketAddrV4},
-};
+use std::net::{Ipv4Addr, SocketAddrV4};
 
-use anyhow::{anyhow, Context};
+use anyhow::{anyhow, bail, Context};
 use clap::{command, value_parser, Arg, ArgAction};
-use libc::{CMSG_DATA, CMSG_FIRSTHDR};
+use netdev::Interface;
 use packet::Builder;
-use socket2::{Domain, MaybeUninitSlice, MsgHdrMut, Protocol, SockAddr, Socket, Type};
+use socket2::{Domain, Protocol, Socket, Type};
 use std::os::fd::AsRawFd;
+
+use receiver::*;
 
 struct BroadcastIf {
     dst_addr: Ipv4Addr,
@@ -16,14 +15,35 @@ struct BroadcastIf {
     socket: Socket,
 }
 
+mod receiver;
+
 const TTL_ID_OFFSET: u8 = 64;
 
 fn main() -> anyhow::Result<()> {
-    stderrlog::new().module(module_path!()).verbosity(4).init().unwrap();
+    stderrlog::new()
+        .module(module_path!())
+        .verbosity(4)
+        .init()
+        .unwrap();
     let args = command!()
-        .arg(Arg::new("id").required(true).value_parser(value_parser!(u8).range(1..99)))
-        .arg(Arg::new("port").required(true).value_parser(value_parser!(u16).range(1..)))
-        .arg(Arg::new("interface").required(true).action(ArgAction::Append))
+        .arg(
+            Arg::new("id")
+                .required(true)
+                .help("System-unique ID for this instance")
+                .value_parser(value_parser!(u8).range(1..99)),
+        )
+        .arg(
+            Arg::new("port")
+                .required(true)
+                .help("UDP port number to relay broadcasts for")
+                .value_parser(value_parser!(u16).range(1..)),
+        )
+        .arg(
+            Arg::new("interface")
+                .required(true)
+                .help("Interface names to relay broadcasts between")
+                .action(ArgAction::Append),
+        )
         .get_matches();
 
     let id: u8 = *args.get_one("id").unwrap();
@@ -34,152 +54,162 @@ fn main() -> anyhow::Result<()> {
         .map(|x| x.as_str())
         .collect();
 
-    println!("{id}, {port}, {bcast_interface_names:?}");
-
     let sys_interfaces = netdev::interface::get_interfaces();
     let mut bcast_interfaces: Vec<BroadcastIf> = vec![];
-    for int_name in bcast_interface_names {
-        let Some(int) = sys_interfaces.iter().find(|i| i.name == int_name) else {
-            return Err(anyhow!("Interface {int_name} not found"));
-        };
-
-        if !int.is_up() || int.is_loopback() {
-            // Ignore
-            continue;
-        }
-
-        let is_bcast_interface = int.is_broadcast();
-
-        let addr = int
-            .ipv4
-            .first()
-            .map(|a| {
-                if is_bcast_interface {
-                    a.broadcast()
-                } else {
-                    a.addr
-                }
-            })
-            .context("No address found for interface {int_name}")?;
-
-        let send_sock = Socket::new(
-            libc::AF_INET.into(),
-            Type::RAW,
-            Some(libc::IPPROTO_RAW.into())).unwrap();
-        send_sock.set_header_included(true).unwrap();
-        send_sock.set_broadcast(true).unwrap();
-        send_sock.bind_device(Some(int.name.as_bytes())).unwrap();
-
-        bcast_interfaces.push(BroadcastIf {
-            dst_addr: addr,
-            socket: send_sock,
-            index: int.index
-        });
+    for if_name in bcast_interface_names {
+        let bcast_if = setup_interface_listen(if_name, &sys_interfaces)
+            .with_context(|| format!("Setting up interface {if_name} failed"))?;
+        bcast_interfaces.push(bcast_if);
     }
 
-    let rcv_sock = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
-    unsafe { setsockopt(rcv_sock.as_raw_fd(), libc::IPPROTO_IP, libc::IP_RECVTTL, 1)? };
-    unsafe { setsockopt(rcv_sock.as_raw_fd(), libc::IPPROTO_IP, libc::IP_PKTINFO, 1)? };
+    let rcv_sock = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))
+        .context("rcv_sock Socket::new")?;
+    unsafe { setsockopt(rcv_sock.as_raw_fd(), libc::IPPROTO_IP, libc::IP_RECVTTL, 1) }
+        .context("setsockopt IP_RECVTTL")?;
+    unsafe { setsockopt(rcv_sock.as_raw_fd(), libc::IPPROTO_IP, libc::IP_PKTINFO, 1) }
+        .context("setsockopt IP_PKTINFO")?;
     let addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port);
-    rcv_sock.bind(&addr.into())?;
-    log::info!("Bound socket {rcv_sock:?}");
+    rcv_sock.bind(&addr.into()).context("rcv_sock bind")?;
 
-    let mut control_buf = vec![MaybeUninit::uninit(); 16 * 1024];
-    let mut rcv_addr: SockAddr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0).into();
-    let mut rcv_buf = vec![MaybeUninit::uninit(); 4096];
+    let mut packet_buf = vec![0u8; 8192];
+    let mut receiver: Receiver<Empty> = rcv_sock.into();
+
+    let mut errors = 0;
 
     loop {
-        let mut rcv_buf_slices = [MaybeUninitSlice::new(&mut rcv_buf); 1];
-        let mut header = MsgHdrMut::new()
-            .with_control(&mut control_buf)
-            .with_addr(&mut rcv_addr)
-            .with_buffers(&mut rcv_buf_slices);
-        let len = rcv_sock.recvmsg(&mut header, 0)?;
-        if len == 0 {
-            continue;
-        }
-
-        if header.control_len() == 0 {
-            log::warn!("Control len zero in received packet");
-            continue;
-        }
-        let controllen = header.control_len();
-
-        let libc_hdr = libc::msghdr {
-            msg_control: control_buf.as_mut_ptr() as *mut libc::c_void,
-            msg_controllen: controllen,
-            msg_flags: 0,
-            msg_name: std::ptr::null_mut(),
-            msg_namelen: 0,
-            msg_iov: std::ptr::null_mut(),
-            msg_iovlen: 0,
-        };
-
-        let mut ttl: Option<u8> = None;
-        let mut if_index: Option<u32> = None;
-
-        let mut cmsg = unsafe { CMSG_FIRSTHDR(&libc_hdr) };
-        while !cmsg.is_null() {
-            if unsafe { (*cmsg).cmsg_type } == libc::IP_TTL {
-                let ttl_ptr = unsafe { CMSG_DATA(cmsg) } as *const libc::c_int;
-                ttl = unsafe { std::ptr::read_unaligned(ttl_ptr) }.try_into().ok();
-            }
-
-            if unsafe { (*cmsg).cmsg_type } == libc::IP_PKTINFO {
-                let pi_ptr = unsafe { CMSG_DATA(cmsg) } as *const libc::in_pktinfo;
-                let pi = unsafe { std::ptr::read_unaligned(pi_ptr) };
-                if_index = pi.ipi_ifindex.try_into().ok();
-            }
-
-            cmsg = unsafe { libc::CMSG_NXTHDR(&libc_hdr, cmsg) };
-        }
-
-        let Some(ttl) = ttl else {
-            log::warn!("TTL not found");
-            continue;
-        };
-        let Some(if_index) = if_index else {
-            log::warn!("Interface index not found");
-            continue;
-        };
-
-        if ttl == TTL_ID_OFFSET + id {
-            log::debug!("Got own pkg");
-            continue;
-        }
-
-        let rcv_addr = rcv_addr.as_socket_ipv4().context("rcv_addr not ipv4")?;
-        log::debug!("Got remote pkg: TTL {ttl}, if {if_index}, from: {rcv_addr:?}");
-
-        let mut packet_buf = vec![0u8; 8192];
-
-        for interface in &bcast_interfaces {
-            if interface.index == if_index {
+        let received = match receiver.recvmsg() {
+            Ok(r) => r,
+            Err(b) => {
+                log::warn!("Error on receive: {}", b.1);
+                errors += 1;
+                if errors >= 5 {
+                    return Err(b.1).context("Too many errors");
+                }
+                receiver = b.0;
                 continue;
             }
-            packet_buf.fill(0);
-            let udp_b =
-                packet::ip::v4::Builder::with(packet::buffer::Slice::new(&mut packet_buf))?
-                    .source(*rcv_addr.ip())?
-                    .destination(interface.dst_addr)?
-                    .id(0x1234)?
-                    .ttl(TTL_ID_OFFSET + id)?
-                    .protocol(packet::ip::Protocol::Udp)?
-                    .udp()?;
+        };
 
-            let udp_payload = unsafe { slice_assume_init_ref(&rcv_buf[..len]) };
-            let udp_packet = udp_b
-                .source(rcv_addr.port())?
-                .destination(port)?
-                .payload(udp_payload)?
-                .build()?;
-            let a = SocketAddrV4::new(interface.dst_addr, port);
-            interface.socket.send_to(udp_packet, &a.into())?;
-            log::debug!("Sent packet to {a}");
+        let handle_res = handle_received(&received, id, port, &bcast_interfaces, &mut packet_buf);
+        match handle_res {
+            Ok(()) => {
+                errors = 0;
+            }
+            Err(e) => {
+                log::warn!("Error while handling packet: {e}");
+                errors += 1;
+                if errors >= 5 {
+                    return Err(e).context("Too many errors");
+                }
+            }
         }
+
+        receiver = received.reset();
+    }
+}
+
+fn handle_received(
+    r: &Receiver<Received>,
+    id: u8,
+    port: u16,
+    broadcast_ifs: &[BroadcastIf],
+    packet_buf: &mut [u8],
+) -> anyhow::Result<()> {
+    if r.len() == 0 {
+        return Ok(());
+    }
+
+    if r.control_len() == 0 {
+        bail!("Control length was zero");
+    }
+
+    let (ttl, if_index) = r.ttl_and_if_index()?;
+
+    if ttl == TTL_ID_OFFSET + id {
+        log::debug!("Got own pkg");
+        return Ok(());
+    }
+
+    let rcv_addr = r.rcv_addr().as_socket_ipv4().context("rcv_addr not ipv4")?;
+    log::debug!("Got remote pkg: TTL {ttl}, if {if_index}, from: {rcv_addr:?}");
+
+    let udp_b = packet::ip::v4::Builder::with(packet::buffer::Slice::new(packet_buf))?
+        .source(*rcv_addr.ip())?
+        .id(0x1234)?
+        .ttl(TTL_ID_OFFSET + id)?
+        .protocol(packet::ip::Protocol::Udp)?
+        .udp()?;
+
+    let udp_packet = udp_b
+        .source(rcv_addr.port())?
+        .destination(port)?
+        .payload(r.payload())?
+        .build()?;
+
+    for interface in broadcast_ifs {
+        if interface.index == if_index {
+            continue;
+        }
+
+        packet::ip::v4::Packet::unchecked(packet::buffer::Slice::new(udp_packet))
+            .set_destination(interface.dst_addr)?
+            .update_checksum()?;
+
+        let a = SocketAddrV4::new(interface.dst_addr, port);
+        interface.socket.send_to(udp_packet, &a.into())?;
+        log::debug!("Sent packet to {a}");
     }
 
     Ok(())
+}
+
+fn setup_interface_listen(
+    if_name: &str,
+    sys_interfaces: &[Interface],
+) -> anyhow::Result<BroadcastIf> {
+    let int = sys_interfaces
+        .iter()
+        .find(|i| i.name == if_name)
+        .context("Interface not found")?;
+
+    if !int.is_up() || int.is_loopback() {
+        // Ignore
+        return Err(anyhow!("Interface is not up or is loopback"));
+    }
+
+    let is_bcast_interface = int.is_broadcast();
+    let addr = int
+        .ipv4
+        .first()
+        .map(|a| {
+            if is_bcast_interface {
+                a.broadcast()
+            } else {
+                a.addr
+            }
+        })
+        .context("No address found for interface")?;
+
+    let send_sock = Socket::new(
+        libc::AF_INET.into(),
+        Type::RAW,
+        Some(libc::IPPROTO_RAW.into()),
+    )
+    .context("Socket::new")?;
+
+    send_sock
+        .set_header_included(true)
+        .context("set_header_included")?;
+    send_sock.set_broadcast(true).context("set_broadcast")?;
+    send_sock
+        .bind_device(Some(int.name.as_bytes()))
+        .context("bind_device")?;
+
+    Ok(BroadcastIf {
+        dst_addr: addr,
+        socket: send_sock,
+        index: int.index,
+    })
 }
 
 unsafe fn setsockopt<T>(
@@ -204,24 +234,4 @@ where
     } else {
         Err(std::io::Error::last_os_error())
     }
-}
-
-/// Assuming all the elements are initialized, get a slice to them.
-///
-/// # Safety
-///
-/// It is up to the caller to guarantee that the `MaybeUninit<T>` elements
-/// really are in an initialized state.
-/// Calling this when the content is not yet fully initialized causes undefined behavior.
-///
-/// See [`assume_init_ref`] for more details and examples.
-///
-/// [`assume_init_ref`]: MaybeUninit::assume_init_ref
-#[inline(always)]
-pub const unsafe fn slice_assume_init_ref<T>(slice: &[MaybeUninit<T>]) -> &[T] {
-    // SAFETY: casting `slice` to a `*const [T]` is safe since the caller guarantees that
-    // `slice` is initialized, and `MaybeUninit` is guaranteed to have the same layout as `T`.
-    // The pointer obtained is valid since it refers to memory owned by `slice` which is a
-    // reference and thus guaranteed to be valid for reads.
-    unsafe { &*(slice as *const [MaybeUninit<T>] as *const [T]) }
 }
