@@ -3,7 +3,7 @@ use std::net::{Ipv4Addr, SocketAddrV4};
 use anyhow::{anyhow, bail, Context};
 use clap::{command, value_parser, Arg, ArgAction};
 use netdev::Interface;
-use packet::Builder;
+use packet::Ipv4UdpPacket;
 use socket2::{Domain, Protocol, Socket, Type};
 use std::os::fd::AsRawFd;
 
@@ -16,6 +16,7 @@ struct BroadcastIf {
 }
 
 mod receiver;
+mod packet;
 
 const TTL_ID_OFFSET: u8 = 64;
 
@@ -71,7 +72,7 @@ fn main() -> anyhow::Result<()> {
     let addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port);
     rcv_sock.bind(&addr.into()).context("rcv_sock bind")?;
 
-    let mut packet_buf = vec![0u8; 8192];
+    let mut packet = Ipv4UdpPacket::new(8192);
     let mut receiver: Receiver<Empty> = rcv_sock.into();
 
     let mut errors = 0;
@@ -90,7 +91,7 @@ fn main() -> anyhow::Result<()> {
             }
         };
 
-        let handle_res = handle_received(&received, id, port, &bcast_interfaces, &mut packet_buf);
+        let handle_res = handle_received(&received, id, port, &bcast_interfaces, &mut packet);
         match handle_res {
             Ok(()) => {
                 errors = 0;
@@ -113,7 +114,7 @@ fn handle_received(
     id: u8,
     port: u16,
     broadcast_ifs: &[BroadcastIf],
-    packet_buf: &mut [u8],
+    packet: &mut Ipv4UdpPacket,
 ) -> anyhow::Result<()> {
     if r.len() == 0 {
         return Ok(());
@@ -133,30 +134,18 @@ fn handle_received(
     let rcv_addr = r.rcv_addr().as_socket_ipv4().context("rcv_addr not ipv4")?;
     log::debug!("Got remote pkg: TTL {ttl}, if {if_index}, from: {rcv_addr:?}");
 
-    let udp_b = packet::ip::v4::Builder::with(packet::buffer::Slice::new(packet_buf))?
-        .source(*rcv_addr.ip())?
-        .id(0x1234)?
-        .ttl(TTL_ID_OFFSET + id)?
-        .protocol(packet::ip::Protocol::Udp)?
-        .udp()?;
-
-    let udp_packet = udp_b
-        .source(rcv_addr.port())?
-        .destination(port)?
-        .payload(r.payload())?
-        .build()?;
+    packet.set_details(&rcv_addr.ip().octets(), TTL_ID_OFFSET + id, rcv_addr.port(), port, r.payload())?;
 
     for interface in broadcast_ifs {
         if interface.index == if_index {
             continue;
         }
 
-        packet::ip::v4::Packet::unchecked(packet::buffer::Slice::new(udp_packet))
-            .set_destination(interface.dst_addr)?
-            .update_checksum()?;
+        packet.set_dst_ip(&interface.dst_addr.octets());
 
+        packet.update_checksums();
         let a = SocketAddrV4::new(interface.dst_addr, port);
-        interface.socket.send_to(udp_packet, &a.into())?;
+        interface.socket.send_to(packet.data(), &a.into())?;
         log::debug!("Sent packet to {a}");
     }
 

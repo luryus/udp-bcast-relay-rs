@@ -27,8 +27,6 @@ impl<'a> Cmsg<'a> {
     }
 
     unsafe fn get<T: Sized>(&self) -> T {
-        assert_eq!(size_of::<T>(), (*self.0).cmsg_len);
-
         let ptr = CMSG_DATA(self.0) as *const T;
         std::ptr::read_unaligned(ptr)
     }
