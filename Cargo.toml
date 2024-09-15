@@ -1,12 +1,12 @@
 [package]
-name = "udp_bcrelay"
+name = "udp-bcast-relay-rs"
 version = "0.1.0"
 edition = "2021"
+license = "GPL-3.0-or-later"
 
 [dependencies]
 anyhow = "1.0.86"
 clap = { version = "4.5.16", features = ["cargo"] }
-itertools = "0.13.0"
 libc = "0.2.158"
 log = "0.4.22"
 netdev = "0.30.0"
