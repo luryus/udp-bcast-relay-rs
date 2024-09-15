@@ -1,5 +1,4 @@
 use anyhow::bail;
-use itertools::Itertools;
 
 pub struct Ipv4UdpPacket {
     buf: Vec<u8>,
@@ -121,19 +120,19 @@ fn udp_checksum(udp_len: u16, ip_addrs: &[u8], udp_packet: &[u8]) -> u16 {
         udp_packet.len()
     };
 
-    sum = ip_addrs.iter().chain(udp_packet[0..udp_packet_len].iter())
-        .copied().tuples()
-        .map(|(a, b)| (a as u16) << 8 | b as u16)
+    sum = ip_addrs.chunks_exact(2)
+        .chain(udp_packet[0..udp_packet_len].chunks_exact(2))
+        .map(|bs| (bs[0] as u16) << 8 | bs[1] as u16)
         .fold(sum, carrying_add);
 
     !sum
 }
 
 fn ipv4_checksum(ip_header: &[u8]) -> u16 {
-    let mut sum = 0u16;
-    for i in (0..ip_header.len()).step_by(2) {
-        sum = carrying_add(sum, (ip_header[i] as u16) << 8 | (ip_header[i + 1] as u16));
-    }
+    let sum = ip_header.chunks_exact(2)
+        .map(|bs| (bs[0] as u16) << 8 | bs[1] as u16)
+        .fold(0u16, carrying_add);
+    
     !sum
 }
 
