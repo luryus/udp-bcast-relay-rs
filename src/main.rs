@@ -6,6 +6,7 @@ use netdev::Interface;
 use packet::Ipv4UdpPacket;
 use socket2::{Domain, Protocol, Socket, Type};
 use std::os::fd::AsRawFd;
+use stderrlog::LogLevelNum;
 
 use receiver::*;
 
@@ -15,18 +16,20 @@ struct BroadcastIf {
     socket: Socket,
 }
 
-mod receiver;
 mod packet;
+mod receiver;
 
 const TTL_ID_OFFSET: u8 = 64;
 
 fn main() -> anyhow::Result<()> {
-    stderrlog::new()
-        .module(module_path!())
-        .verbosity(4)
-        .init()
-        .unwrap();
     let args = command!()
+        .arg(
+            Arg::new("verbose")
+                .short('v')
+                .long("verbose")
+                .action(ArgAction::SetTrue)
+                .help("Print more logs"),
+        )
         .arg(
             Arg::new("id")
                 .required(true)
@@ -46,6 +49,16 @@ fn main() -> anyhow::Result<()> {
                 .action(ArgAction::Append),
         )
         .get_matches();
+
+    stderrlog::new()
+        .module(module_path!())
+        .verbosity(if args.get_flag("verbose") {
+            LogLevelNum::Debug
+        } else {
+            LogLevelNum::Info
+        })
+        .init()
+        .unwrap();
 
     let id: u8 = *args.get_one("id").unwrap();
     let port: u16 = *args.get_one("port").unwrap();
@@ -134,7 +147,13 @@ fn handle_received(
     let rcv_addr = r.rcv_addr().as_socket_ipv4().context("rcv_addr not ipv4")?;
     log::debug!("Got remote pkg: TTL {ttl}, if {if_index}, from: {rcv_addr:?}");
 
-    packet.set_details(&rcv_addr.ip().octets(), TTL_ID_OFFSET + id, rcv_addr.port(), port, r.payload())?;
+    packet.set_details(
+        &rcv_addr.ip().octets(),
+        TTL_ID_OFFSET + id,
+        rcv_addr.port(),
+        port,
+        r.payload(),
+    )?;
 
     for interface in broadcast_ifs {
         if interface.index == if_index {
@@ -193,6 +212,8 @@ fn setup_interface_listen(
     send_sock
         .bind_device(Some(int.name.as_bytes()))
         .context("bind_device")?;
+
+    log::debug!("Listening on interface {}", if_name);
 
     Ok(BroadcastIf {
         dst_addr: addr,
