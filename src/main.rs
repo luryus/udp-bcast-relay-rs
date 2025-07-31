@@ -193,7 +193,7 @@ fn setup_interface_listen(
             if is_bcast_interface {
                 a.broadcast()
             } else {
-                a.addr
+                a.addr()
             }
         })
         .context("No address found for interface")?;
@@ -206,7 +206,7 @@ fn setup_interface_listen(
     .context("Socket::new")?;
 
     send_sock
-        .set_header_included(true)
+        .set_header_included_v4(true)
         .context("set_header_included")?;
     send_sock.set_broadcast(true).context("set_broadcast")?;
     send_sock
