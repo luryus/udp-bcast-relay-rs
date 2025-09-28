@@ -145,7 +145,7 @@ impl Receiver<Received> {
         unsafe { slice_assume_init_ref(&self.control_buf[..self.control_len]) }
     }
 
-    fn cmsgs(&self) -> impl Iterator<Item = Cmsg> {
+    fn cmsgs(&self) -> impl Iterator<Item = Cmsg<'_>> {
         // Make a new instance of a msg header, we need this for the CMSG_ things
         let libc_hdr = libc::msghdr {
             msg_control: self.control().as_ptr() as *mut libc::c_void,
