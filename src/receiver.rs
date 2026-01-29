@@ -61,6 +61,7 @@ impl Receiver<Empty> {
     }
 
     pub fn recvmsg(mut self) -> Result<Receiver<Received>, Box<(Receiver<Empty>, std::io::Error)>> {
+        let rcv_buf_len = self.rcv_buf.len();
         let mut rcv_buf_slices = [MaybeUninitSlice::new(&mut self.rcv_buf); 1];
         let mut header = MsgHdrMut::new()
             .with_control(&mut self.control_buf)
@@ -73,6 +74,9 @@ impl Receiver<Empty> {
                 return Err(Box::new((self, e)));
             }
         };
+
+        debug_assert!(len <= rcv_buf_len);
+
         let control_len = header.control_len();
 
         Ok(Receiver {
@@ -110,7 +114,9 @@ impl Receiver<Received> {
         &self.rcv_addr
     }
     pub fn payload(&self) -> &[u8] {
-        unsafe { slice_assume_init_ref(&self.rcv_buf[..self.len]) }
+        // SAFETY: Receiver<Received> can only be constructed via a valid
+        // call to recvmsg, which leaves rcv_buf and len properly initialized.
+        unsafe { self.rcv_buf[..self.len].assume_init_ref() }
     }
 
     pub fn ttl_and_if_index(&self) -> anyhow::Result<(u8, u32)> {
@@ -142,7 +148,7 @@ impl Receiver<Received> {
         // SAFETY: Receiver<Received> can only be constructed via a valid
         // call to recvmsg, which leaves the control_buf and control_len properly
         // initialized.
-        unsafe { slice_assume_init_ref(&self.control_buf[..self.control_len]) }
+        unsafe { self.control_buf[..self.control_len].assume_init_ref() }
     }
 
     fn cmsgs(&self) -> impl Iterator<Item = Cmsg<'_>> {
@@ -181,24 +187,4 @@ impl From<Socket> for Receiver<Empty> {
     fn from(value: Socket) -> Self {
         Self::with_socket(value)
     }
-}
-
-/// Assuming all the elements are initialized, get a slice to them.
-///
-/// # Safety
-///
-/// It is up to the caller to guarantee that the `MaybeUninit<T>` elements
-/// really are in an initialized state.
-/// Calling this when the content is not yet fully initialized causes undefined behavior.
-///
-/// See [`assume_init_ref`] for more details and examples.
-///
-/// [`assume_init_ref`]: MaybeUninit::assume_init_ref
-#[inline(always)]
-const unsafe fn slice_assume_init_ref<T>(slice: &[MaybeUninit<T>]) -> &[T] {
-    // SAFETY: casting `slice` to a `*const [T]` is safe since the caller guarantees that
-    // `slice` is initialized, and `MaybeUninit` is guaranteed to have the same layout as `T`.
-    // The pointer obtained is valid since it refers to memory owned by `slice` which is a
-    // reference and thus guaranteed to be valid for reads.
-    unsafe { &*(slice as *const [MaybeUninit<T>] as *const [T]) }
 }
