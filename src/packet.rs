@@ -145,7 +145,6 @@ fn carrying_add(a: u16, b: u16) -> u16 {
 #[cfg(test)] 
 mod test {
     use super::*;
-    use etherparse::{Ipv4Slice, UdpSlice};
 
     #[test]
     fn test_packet() {
@@ -155,9 +154,14 @@ mod test {
         p.set_dst_ip(&[192,168,0,255]);
         p.update_checksums();
 
-        let d = p.data();   
-        let ipv4 = Ipv4Slice::from_slice(d).unwrap();
-        let udp = UdpSlice::from_slice(ipv4.payload().payload).unwrap();
-        assert_eq!(udp.payload(), &payload);  
+        let d = p.data();
+        let expected = &[
+            0x45, 0x00, 0x00, 0x24, 0x12, 0x34, 0x40, 0x00,
+            0x47, 0x11, 0xe0, 0xec, 0x7f, 0x00, 0x00, 0x01,
+            0xc0, 0xa8, 0x00, 0xff, 0x2b, 0xd7, 0x81, 0xc5,
+            0x00, 0x10, 0x01, 0x75, 0x01, 0x02, 0x03, 0x04,
+            0x05, 0x06, 0x07, 0x08, 
+        ];
+        assert_eq!(d, expected);
     }
 }
