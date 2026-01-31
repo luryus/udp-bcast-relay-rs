@@ -18,7 +18,7 @@
 //! cargo test --test integration_test
 //! ```
 
-use std::time::Duration;
+use std::{path::Path, time::Duration};
 use testcontainers::{
     core::ExecCommand, runners::AsyncRunner, ContainerAsync, GenericImage, ImageExt,
 };
@@ -32,11 +32,13 @@ struct TestContainer {
 
 impl TestContainer {
     /// Build the Docker image and start a privileged container
-    async fn start() -> Self {
+    async fn start(binary_file_dir: &Path) -> Self {
         // Build the test Docker image first
         let build_output = std::process::Command::new("docker")
             .args([
                 "build",
+                "--build-context",
+                &format!("bin-file-dir={}", binary_file_dir.as_os_str().to_string_lossy()),
                 "-t",
                 "udp-relay-test:latest",
                 "-f",
@@ -118,13 +120,6 @@ impl TestContainer {
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
 
-    async fn kill_listeners(&self) {
-        self.container
-            .exec(ExecCommand::new(["killall", "socat"]))
-            .await
-            .expect("Failed to killall socat listener");
-    }
-
     /// Send a UDP broadcast from the specified namespace
     async fn send_broadcast(
         &self,
@@ -159,11 +154,6 @@ impl TestContainer {
         String::from_utf8_lossy(&output).to_string()
     }
 
-    /// Read the relay log for debugging
-    async fn read_relay_log(&self) -> String {
-        self.read_file("/tmp/relay.log").await
-    }
-
     /// Run a command and get its output
     async fn exec(&self, cmd: &str) -> String {
         let mut result = self
@@ -177,38 +167,11 @@ impl TestContainer {
     }
 }
 
-/// Build the release binary before running tests
-fn ensure_binary_built() {
-    let output = std::process::Command::new("cargo")
-        .args(["build", "--release"])
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .output()
-        .expect("Failed to run cargo build");
-
-    if !output.status.success() {
-        panic!(
-            "Cargo build failed:\nstdout: {}\nstderr: {}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    // Copy the binary to the docker context
-    let src = format!(
-        "{}/target/release/udp-bcast-relay-rs",
-        env!("CARGO_MANIFEST_DIR")
-    );
-    let dst = format!(
-        "{}/tests/docker/udp-bcast-relay-rs",
-        env!("CARGO_MANIFEST_DIR")
-    );
-    std::fs::copy(&src, &dst).expect("Failed to copy binary to docker context");
-}
-
 /// Helper to setup the test environment
 async fn setup_test_environment() -> TestContainer {
-    ensure_binary_built();
-    let container = TestContainer::start().await;
+    let binary = assert_cmd::cargo::cargo_bin!();
+    let bin_dir = binary.parent().expect("Could not determine binary directory");
+    let container = TestContainer::start(bin_dir).await;
     container.setup_namespaces().await;
     container
 }
