@@ -2,7 +2,9 @@
 
 Reimplementation of https://github.com/nomeata/udp-broadcast-relay in Rust.
 
+## Testing
 
+The `tests/integration_test.rs` file contains integration tests that use privileged Docker containers to test the relay functionality. To run them, Docker must be available and the user must have permissions to run Docker commands.
 
 ---
 

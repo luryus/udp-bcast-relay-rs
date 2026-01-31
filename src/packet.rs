@@ -2,7 +2,7 @@ use anyhow::bail;
 
 pub struct Ipv4UdpPacket {
     buf: Vec<u8>,
-    payload_len: u16
+    payload_len: u16,
 }
 
 const UDP_PROTOCOL_NUMBER: u8 = 0x11;
@@ -52,21 +52,20 @@ impl Ipv4UdpPacket {
         dst_port: u16,
         payload: &[u8],
     ) -> anyhow::Result<()> {
-        if (u16::MAX as usize) < (TOTAL_HEADER_LEN + payload.len())
-        {
+        if (u16::MAX as usize) < (TOTAL_HEADER_LEN + payload.len()) {
             bail!("Payload too long");
         }
 
         let udp_len = (UDP_HEADER_LEN + payload.len()) as u16;
         let ip_len = EMPTY_IPV4_HEADER.len() as u16 + udp_len;
 
-        self.buf[IPV4_SRC_OFFSET..IPV4_SRC_OFFSET+4].copy_from_slice(&src_ip[..]);
-        self.buf[IPV4_LENGTH_OFFSET..IPV4_LENGTH_OFFSET+2].copy_from_slice(&ip_len.to_be_bytes());
+        self.buf[IPV4_SRC_OFFSET..IPV4_SRC_OFFSET + 4].copy_from_slice(&src_ip[..]);
+        self.buf[IPV4_LENGTH_OFFSET..IPV4_LENGTH_OFFSET + 2].copy_from_slice(&ip_len.to_be_bytes());
         self.buf[IPV4_TTL_OFFSET] = ttl;
 
-        self.buf[UDP_SRC_OFFSET..UDP_SRC_OFFSET+2].copy_from_slice(&src_port.to_be_bytes());
-        self.buf[UDP_DST_OFFSET..UDP_DST_OFFSET+2].copy_from_slice(&dst_port.to_be_bytes());
-        self.buf[UDP_LENGTH_OFFSET..UDP_LENGTH_OFFSET+2]
+        self.buf[UDP_SRC_OFFSET..UDP_SRC_OFFSET + 2].copy_from_slice(&src_port.to_be_bytes());
+        self.buf[UDP_DST_OFFSET..UDP_DST_OFFSET + 2].copy_from_slice(&dst_port.to_be_bytes());
+        self.buf[UDP_LENGTH_OFFSET..UDP_LENGTH_OFFSET + 2]
             .copy_from_slice(&((UDP_HEADER_LEN + payload.len()) as u16).to_be_bytes());
 
         self.buf.truncate(TOTAL_HEADER_LEN);
@@ -74,14 +73,13 @@ impl Ipv4UdpPacket {
         self.payload_len = payload.len().try_into().unwrap();
 
         debug_assert_eq!(self.total_len(), self.buf.len());
-        
+
         Ok(())
     }
 
     pub fn set_dst_ip(&mut self, dst_ip: &[u8; 4]) {
-        self.buf[IPV4_DST_OFFSET..IPV4_DST_OFFSET+4].copy_from_slice(&dst_ip[..]);
+        self.buf[IPV4_DST_OFFSET..IPV4_DST_OFFSET + 4].copy_from_slice(&dst_ip[..]);
     }
-
 
     pub fn update_checksums(&mut self) {
         self.buf[IPV4_CHECKSUM_OFFSET..IPV4_CHECKSUM_OFFSET + 2].fill(0);
@@ -120,7 +118,8 @@ fn udp_checksum(udp_len: u16, ip_addrs: &[u8], udp_packet: &[u8]) -> u16 {
         udp_packet.len()
     };
 
-    sum = ip_addrs.chunks_exact(2)
+    sum = ip_addrs
+        .chunks_exact(2)
         .chain(udp_packet[0..udp_packet_len].chunks_exact(2))
         .map(|bs| (bs[0] as u16) << 8 | bs[1] as u16)
         .fold(sum, carrying_add);
@@ -129,10 +128,11 @@ fn udp_checksum(udp_len: u16, ip_addrs: &[u8], udp_packet: &[u8]) -> u16 {
 }
 
 fn ipv4_checksum(ip_header: &[u8]) -> u16 {
-    let sum = ip_header.chunks_exact(2)
+    let sum = ip_header
+        .chunks_exact(2)
         .map(|bs| (bs[0] as u16) << 8 | bs[1] as u16)
         .fold(0u16, carrying_add);
-    
+
     !sum
 }
 
@@ -142,7 +142,7 @@ fn carrying_add(a: u16, b: u16) -> u16 {
     res + carry as u16
 }
 
-#[cfg(test)] 
+#[cfg(test)]
 mod test {
     use super::*;
 
@@ -150,8 +150,9 @@ mod test {
     fn test_packet() {
         let payload = [0x1, 0x2, 0x3, 0x4, 0x5, 0x6, 0x7, 0x8];
         let mut p = Ipv4UdpPacket::new(128);
-        p.set_details(&[127,0,0,1], 71, 11223, 33221, &payload).unwrap();
-        p.set_dst_ip(&[192,168,0,255]);
+        p.set_details(&[127, 0, 0, 1], 71, 11223, 33221, &payload)
+            .unwrap();
+        p.set_dst_ip(&[192, 168, 0, 255]);
         p.update_checksums();
 
         let d = p.data();

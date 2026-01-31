@@ -13,3 +13,7 @@ log = "0.4.22"
 netdev = "0.40"
 socket2 = { version = "0.6.0", features = ["all"] }
 stderrlog = { version = "0.6.0", default-features = false }
+
+[dev-dependencies]
+testcontainers = "0.23"
+tokio = { version = "1", features = ["full"] }
