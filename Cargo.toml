@@ -10,11 +10,11 @@ anyhow = "1.0.86"
 clap = { version = "4.5.16", features = ["cargo"] }
 libc = "0.2.174"
 log = "0.4.22"
-netdev = "0.40"
+netdev = "0.42"
 socket2 = { version = "0.6.0", features = ["all"] }
 stderrlog = { version = "0.6.0", default-features = false }
 
 [dev-dependencies]
 assert_cmd = "2.1.2"
-testcontainers = "0.23"
+testcontainers = "0.27"
 tokio = { version = "1", features = ["full"] }
