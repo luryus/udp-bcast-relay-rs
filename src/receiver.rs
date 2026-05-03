@@ -4,8 +4,8 @@ use std::{
     net::{Ipv4Addr, SocketAddrV4},
 };
 
-use anyhow::{bail, Context};
-use libc::{cmsghdr, in_pktinfo, CMSG_DATA, CMSG_FIRSTHDR, CMSG_NXTHDR};
+use anyhow::{Context, bail};
+use libc::{CMSG_DATA, CMSG_FIRSTHDR, CMSG_NXTHDR, cmsghdr, in_pktinfo};
 use socket2::{MaybeUninitSlice, MsgHdrMut, SockAddr, Socket};
 
 pub struct Cmsg<'a>(*mut cmsghdr, PhantomData<&'a Receiver<Received>>);
@@ -23,12 +23,14 @@ impl<'a> Cmsg<'a> {
     }
 
     unsafe fn get_if_type<T: Sized>(&self, typ: i32) -> Option<T> {
-        (self.typ() == typ).then(|| self.get())
+        unsafe { (self.typ() == typ).then(|| self.get()) }
     }
 
     unsafe fn get<T: Sized>(&self) -> T {
-        let ptr = CMSG_DATA(self.0) as *const T;
-        std::ptr::read_unaligned(ptr)
+        unsafe {
+            let ptr = CMSG_DATA(self.0) as *const T;
+            std::ptr::read_unaligned(ptr)
+        }
     }
 }
 

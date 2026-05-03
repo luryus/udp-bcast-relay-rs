@@ -1,7 +1,7 @@
 use std::net::{Ipv4Addr, SocketAddrV4};
 
-use anyhow::{anyhow, bail, Context};
-use clap::{command, value_parser, Arg, ArgAction};
+use anyhow::{Context, anyhow, bail};
+use clap::{Arg, ArgAction, command, value_parser};
 use netdev::Interface;
 use packet::Ipv4UdpPacket;
 use socket2::{Domain, Protocol, Socket, Type};
@@ -231,17 +231,19 @@ unsafe fn setsockopt<T>(
 where
     T: Copy,
 {
-    let value = &value as *const T as *const libc::c_void;
-    if libc::setsockopt(
-        socket,
-        level,
-        name,
-        value,
-        std::mem::size_of::<T>() as libc::socklen_t,
-    ) == 0
-    {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error())
+    unsafe {
+        let value = &value as *const T as *const libc::c_void;
+        if libc::setsockopt(
+            socket,
+            level,
+            name,
+            value,
+            std::mem::size_of::<T>() as libc::socklen_t,
+        ) == 0
+        {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
     }
 }

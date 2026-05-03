@@ -20,7 +20,7 @@
 
 use std::{path::Path, time::Duration};
 use testcontainers::{
-    core::ExecCommand, runners::AsyncRunner, ContainerAsync, GenericImage, ImageExt,
+    ContainerAsync, GenericImage, ImageExt, core::ExecCommand, runners::AsyncRunner,
 };
 
 const TEST_PORT: u16 = 9999;
@@ -38,7 +38,10 @@ impl TestContainer {
             .args([
                 "build",
                 "--build-context",
-                &format!("bin-file-dir={}", binary_file_dir.as_os_str().to_string_lossy()),
+                &format!(
+                    "bin-file-dir={}",
+                    binary_file_dir.as_os_str().to_string_lossy()
+                ),
                 "-t",
                 "udp-relay-test:latest",
                 "-f",
@@ -170,7 +173,9 @@ impl TestContainer {
 /// Helper to setup the test environment
 async fn setup_test_environment() -> TestContainer {
     let binary = assert_cmd::cargo::cargo_bin!();
-    let bin_dir = binary.parent().expect("Could not determine binary directory");
+    let bin_dir = binary
+        .parent()
+        .expect("Could not determine binary directory");
     let container = TestContainer::start(bin_dir).await;
     container.setup_namespaces().await;
     container
@@ -186,7 +191,6 @@ async fn test_basic_broadcast_relay() {
         .start_listener("ns_receiver", TEST_PORT, "/tmp/received.txt")
         .await;
 
-
     container
         .start_relay(1, TEST_PORT, &["veth1b", "veth2b"])
         .await;
@@ -196,7 +200,6 @@ async fn test_basic_broadcast_relay() {
     container
         .send_broadcast("ns_sender", "10.0.1.255", TEST_PORT, test_message)
         .await;
-
 
     let received = container.read_file("/tmp/received.txt").await;
 
@@ -291,7 +294,9 @@ async fn test_multiple_packets() {
     container.exec(&cmd).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
 
-    container.start_relay(1, TEST_PORT, &["veth1b", "veth2b"]).await;
+    container
+        .start_relay(1, TEST_PORT, &["veth1b", "veth2b"])
+        .await;
 
     // Send multiple messages
     for i in 1..=3 {
